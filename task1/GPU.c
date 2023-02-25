@@ -19,8 +19,11 @@ int main()
     for (int i =0; i<N;i++)
         res += arr[i];
 
-    printf("res: %.20lf\n",res);
+    printf("res: %.20f\n",res);
 
   }
+#pragma acc exit data delete(arr)
+  free(arr);
+  return 0;
 }
 
