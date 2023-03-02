@@ -56,6 +56,7 @@ inline double average_neighbours(double* arr,int id,int net_size)
 
 int main(int argc,char *argv[])
 {
+
     //Init default values
     double accuracy = std::pow(10,-6);
     int net_len=128;
@@ -85,7 +86,7 @@ int main(int argc,char *argv[])
     double ru = 20;
     double ld = 30;
     double rd = 20;
-#pragma acc data copy(net[0:net_size]),create(net_buff[0:net_size])
+#pragma acc data copyin(net[0:net_size]),create(net_buff[0:net_size])
 {
 #pragma acc parallel loop
     for (int i=0;i<net_len;i++)
@@ -129,6 +130,6 @@ int main(int argc,char *argv[])
 }
 #pragma acc exit data delete(net[:net_len],net_buff[:net_len])
 
-    delete net;
-    delete net_buff;
+    delete[] net;
+    delete[] net_buff;
 }
