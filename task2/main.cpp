@@ -22,7 +22,7 @@ void argpars(Type& arg, std::string& str)
 		throw std::runtime_error("Not a valid argument");
 }
 
-inline double average_neighbours(double* arr,int id,int net_len)
+inline double average_neighbours(double* arr,unsigned int id,unsigned int net_len)
 {
 
     int x = id%net_len;
@@ -59,8 +59,8 @@ int main(int argc,char *argv[])
 
     //Init default values
     double accuracy = std::pow(10,-6);
-    int net_len=128;
-    int iteration_cnt = std::pow(10,6);
+    unsigned int net_len=128;
+    unsigned int iteration_cnt = std::pow(10,6);
 
     //Reading arguments
     for (int i =1;i<argc-1;i+=2)
@@ -76,6 +76,11 @@ int main(int argc,char *argv[])
             argpars(iteration_cnt,value);
     }
 
+    //Set limits
+    net_len = std::min((unsigned int)std::pow(10,6),net_len);
+    accuracy = std::max(std::pow(10,-6),accuracy);
+
+
     //Init net and buffer
     int net_size = net_len*net_len;
     double* net = new double[net_size];
@@ -89,7 +94,7 @@ int main(int argc,char *argv[])
 #pragma acc data copyin(net[0:net_size]),create(net_buff[0:net_size])
 {
 #pragma acc parallel loop
-    for (int i=0;i<net_len;i++)
+    for (unsigned int i=0;i<net_len;i++)
     {
         net[i] = (ru-lu)/(net_len-1)*i + lu;
         net[net_len*i] = (ld-lu)/(net_len-1)*i + lu;
@@ -100,7 +105,7 @@ int main(int argc,char *argv[])
 
     //Solving
     double max_acc;
-    int iter;
+    unsigned int iter;
     for (iter = 0;iter <iteration_cnt;iter++)
     {
         max_acc=0.0;
@@ -109,20 +114,20 @@ int main(int argc,char *argv[])
         if (iter%2==0)
         {
             #pragma acc parallel loop
-            for (int i =0;i<net_size;i++)
+            for (unsigned int i =0;i<net_size;i++)
                     net_buff[i] = average_neighbours(net,i,net_len);
         }
         else
         {
             #pragma acc parallel loop
-            for (int i =0;i<net_size;i++)
+            for (unsigned int i =0;i<net_size;i++)
                     net[i] = average_neighbours(net_buff,i,net_len);
         }
 
 
 //Doing reduction to find max
 #pragma acc parallel loop reduction(max:max_acc)
-        for (int i =0;i<net_len;i++)
+        for (unsigned int i =0;i<net_len;i++)
             max_acc = fmax(max_acc,fabs(net[i] - net_buff[i]));
 
         if (max_acc<accuracy)
