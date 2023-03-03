@@ -22,11 +22,11 @@ void argpars(Type& arg, std::string& str)
 		throw std::runtime_error("Not a valid argument");
 }
 
-inline double average_neighbours(double* arr,int id,int net_size)
+inline double average_neighbours(double* arr,int id,int net_len)
 {
 
-    int x = id%net_size;
-    int y = id/net_size;
+    int x = id%net_len;
+    int y = id/net_len;
     int neigh_cnt = 1;
     double sum = arr[id];
     if (x-1 >= 0)
@@ -34,19 +34,19 @@ inline double average_neighbours(double* arr,int id,int net_size)
         sum += arr[id-1];
         neigh_cnt++;
     }
-    if (x+1 < net_size)
+    if (x+1 < net_len)
     {
         sum += arr[id+1];
         neigh_cnt++;
     }
     if (y-1 >= 0)
     {
-        sum += arr[id-net_size];
+        sum += arr[id-net_len];
         neigh_cnt++;
     }
-    if (y+1 < net_size)
+    if (y+1 < net_len)
     {
-        sum += arr[id+net_size];
+        sum += arr[id+net_len];
         neigh_cnt++;
     }
     return sum/neigh_cnt;
@@ -106,9 +106,19 @@ int main(int argc,char *argv[])
         max_acc=0.0;
 
 //Set the new array
-#pragma acc parallel loop
-        for (int i =0;i<net_size;i++)
-            net_buff[i] = average_neighbours(net,i,net_len);
+        if (iter%2==0)
+        {
+            #pragma acc parallel loop
+            for (int i =0;i<net_size;i++)
+                    net_buff[i] = average_neighbours(net,i,net_len);
+        }
+        else
+        {
+            #pragma acc parallel loop
+            for (int i =0;i<net_size;i++)
+                    net[i] = average_neighbours(net_buff,i,net_len);
+        }
+
 
 //Doing reduction to find max
 #pragma acc parallel loop reduction(max:max_acc)
@@ -117,11 +127,6 @@ int main(int argc,char *argv[])
 
         if (max_acc<accuracy)
             break;
-
-//Copy array back
-#pragma acc parallel loop
-        for (int i =0;i<net_size;i++)
-            net[i]=net_buff[i];
 
     }
 
