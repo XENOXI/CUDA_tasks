@@ -121,6 +121,7 @@ int main(int argc,char *argv[])
 //Doing reduction to find max
     if (iter % 10 == 0 || iter == iteration_cnt-1)
     {
+        #pragma acc data copyin(max_acc)
         #pragma acc parallel loop reduction(max:max_acc)
             for (unsigned int x =1;x<net_len-1;x++)
                 #pragma acc loop reduction(max:max_acc)
@@ -130,7 +131,7 @@ int main(int argc,char *argv[])
                     max_acc = fmax(max_acc,fabs(net[i] - net_buff[i]));
                 }
                     
-            
+        #pragma acc data copyout(max_acc) 
         if (max_acc<accuracy)
             break;
     }
