@@ -90,7 +90,7 @@ int main(int argc,char *argv[])
     for (iter = 0;iter <iteration_cnt;iter++)
     {
         max_acc=0.0;
-        #pragma acc data present(net[:net_size],net_buff[:net_size])
+        #pragma acc data present(net,net_buff)
 //Set the new array
         #pragma acc parallel loop
         for (unsigned int x =1;x<net_len-1;x++)
