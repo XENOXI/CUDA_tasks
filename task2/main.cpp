@@ -24,32 +24,8 @@ void argpars(Type& arg, std::string& str)
 
 inline double average_neighbours(double* arr,unsigned int id,unsigned int net_len)
 {
-
-    int x = id%net_len;
-    int y = id/net_len;
-    int neigh_cnt = 1;
-    double sum = arr[id];
-    if (x-1 >= 0)
-    {
-        sum += arr[id-1];
-        neigh_cnt++;
-    }
-    if (x+1 < net_len)
-    {
-        sum += arr[id+1];
-        neigh_cnt++;
-    }
-    if (y-1 >= 0)
-    {
-        sum += arr[id-net_len];
-        neigh_cnt++;
-    }
-    if (y+1 < net_len)
-    {
-        sum += arr[id+net_len];
-        neigh_cnt++;
-    }
-    return sum/neigh_cnt;
+    double sum = arr[id-1] + arr[id+1] + arr[id-net_len] + arr[id+net_len];
+    return sum/4;
 }
 
 
@@ -100,6 +76,11 @@ int main(int argc,char *argv[])
         net[net_len*i] = (ld-lu)/(net_len-1)*i + lu;
         net[net_len*(net_len-1)+i] = (rd-ld)/(net_len-1)*i + ld;
         net[net_len-1 + net_len*i] = (rd-ru)/(net_len-1)*i + ru;
+
+        net_buff[i] = (ru-lu)/(net_len-1)*i + lu;
+        net_buff[net_len*i] = (ld-lu)/(net_len-1)*i + lu;
+        net_buff[net_len*(net_len-1)+i] = (rd-ld)/(net_len-1)*i + ld;
+        net_buff[net_len-1 + net_len*i] = (rd-ru)/(net_len-1)*i + ru;
     }
     
 
@@ -114,24 +95,46 @@ int main(int argc,char *argv[])
         if (iter%2==0)
         {
             #pragma acc parallel loop
-            for (unsigned int i =0;i<net_size;i++)
-                    net_buff[i] = average_neighbours(net,i,net_len);
+            for (unsigned int x =1;x<net_len-1;x++)
+                #pragma acc loop
+                for (unsigned int y=1;y<net_len-1;y++)
+                {
+                    unsigned int id = y*net_len+x;
+                    net_buff[id] = average_neighbours(net,id,net_len);
+                }
+                    
         }
         else
         {
             #pragma acc parallel loop
-            for (unsigned int i =0;i<net_size;i++)
-                    net[i] = average_neighbours(net_buff,i,net_len);
+            for (unsigned int x =1;x<net_len-1;x++)
+                #pragma acc loop
+                for (unsigned int y=1;y<net_len-1;y++)
+                {
+                    unsigned int id = y*net_len+x;
+                    net[id] = average_neighbours(net_buff,id,net_len);
+                }
         }
 
+    
 
 //Doing reduction to find max
-#pragma acc parallel loop reduction(max:max_acc)
-        for (unsigned int i =0;i<net_len;i++)
-            max_acc = fmax(max_acc,fabs(net[i] - net_buff[i]));
-
+    if (iter % 10 == 0 || iter == iteration_cnt-1)
+    {
+        #pragma acc parallel loop reduction(max:max_acc)
+            for (unsigned int x =1;x<net_len-1;x++)
+                #pragma acc loop reduction(max:max_acc)
+                for (unsigned int y=1;y<net_len-1;y++)
+                {
+                    unsigned int i = y*net_len+x;
+                    max_acc = fmax(max_acc,fabs(net[i] - net_buff[i]));
+                }
+                    
+            
         if (max_acc<accuracy)
             break;
+    }
+
 
     }
 
