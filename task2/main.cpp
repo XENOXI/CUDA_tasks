@@ -90,38 +90,25 @@ int main(int argc,char *argv[])
     for (iter = 0;iter <iteration_cnt;iter++)
     {
         max_acc=0.0;
-
+        #pragma acc data present(net[:net_size],net_buff[:net_size])
 //Set the new array
-        if (iter%2==0)
-        {
-            #pragma acc parallel loop
-            for (unsigned int x =1;x<net_len-1;x++)
-                #pragma acc loop
-                for (unsigned int y=1;y<net_len-1;y++)
-                {
-                    unsigned int id = y*net_len+x;
-                    net_buff[id] = average_neighbours(net,id,net_len);
-                }
+        #pragma acc parallel loop
+        for (unsigned int x =1;x<net_len-1;x++)
+            #pragma acc loop
+            for (unsigned int y=1;y<net_len-1;y++)
+            {
+                unsigned int id = y*net_len+x;
+                net_buff[id] = average_neighbours(net,id,net_len);
+            }
                     
-        }
-        else
-        {
-            #pragma acc parallel loop
-            for (unsigned int x =1;x<net_len-1;x++)
-                #pragma acc loop
-                for (unsigned int y=1;y<net_len-1;y++)
-                {
-                    unsigned int id = y*net_len+x;
-                    net[id] = average_neighbours(net_buff,id,net_len);
-                }
-        }
+
 
     
 
 //Doing reduction to find max
     if (iter % 10 == 0 || iter == iteration_cnt-1)
     {
-        #pragma acc data copyin(max_acc)
+        #pragma acc data copy(max_acc)
         #pragma acc parallel loop reduction(max:max_acc)
             for (unsigned int x =1;x<net_len-1;x++)
                 #pragma acc loop reduction(max:max_acc)
@@ -130,12 +117,11 @@ int main(int argc,char *argv[])
                     unsigned int i = y*net_len+x;
                     max_acc = fmax(max_acc,fabs(net[i] - net_buff[i]));
                 }
-                    
-        #pragma acc data copyout(max_acc) 
+
         if (max_acc<accuracy)
             break;
     }
-
+    std::swap(net,net_buff);
 
     }
 
