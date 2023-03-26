@@ -6,9 +6,8 @@
 #include <cstring>
 #include <cuda_runtime.h>
 #include <cuda.h>
-#include "cublas_v2.h"
+#include <cub/cub.cuh>
 
-#define CUBLASCHECK(err) if (err != CUBLAS_STATUS_SUCCESS) { printf ("CUBLAS initialization failed\n"); return EXIT_FAILURE; }
 #define CREATE_DEVICE_ARR(type,arg,size) type* arg; cudaMalloc((void**)&arg, sizeof(type) * size);
 #define CUDACHECK(name) if (cudaGetLastError() != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) throw std::runtime_error(name);
 
@@ -85,12 +84,6 @@ __global__ void difference(double* A,double* B)
 
 int main(int argc,char *argv[])
 {
-    
-    cublasStatus_t stat;
-    cublasHandle_t handle;
-    stat = cublasCreate(&handle);
-    CUBLASCHECK(stat)
-    
 
 
     //Init default values
@@ -123,6 +116,7 @@ int main(int argc,char *argv[])
     CREATE_DEVICE_ARR(double,buff,net_size)
     CREATE_DEVICE_ARR(double,net,net_size)
     CREATE_DEVICE_ARR(double,net_buff,net_size)
+    CREATE_DEVICE_ARR(double,d_out,1)
 
     cudaMemset(net,0,sizeof(double)*net_size);
 
@@ -133,22 +127,23 @@ int main(int argc,char *argv[])
 
     unsigned int threads=net_len;
 
-    if (threads>1024)
-        throw std::runtime_error("Net len is too big");
-
     set_border<<<1,threads>>>(net,net_len,lu,ld,ru,rd);
-    CUDACHECK("set_borders")
 
     cudaMemcpy(net_buff,net, sizeof(double)*net_size, cudaMemcpyDeviceToDevice);
-    
-    int idx = 0;
-   
 
     //Solving
     unsigned int iter;
     double max_acc=0;
 
+    
 
+    void     *d_temp_storage = NULL;
+    size_t   temp_storage_bytes = 0;
+
+    cub::DeviceReduce::Max(d_temp_storage, temp_storage_bytes, buff, d_out, net_size);
+
+    // Allocate temporary storage
+    cudaMalloc(&d_temp_storage, temp_storage_bytes);
 
     
     dim3 dim_for_interpolate(32,32);
@@ -159,18 +154,14 @@ int main(int argc,char *argv[])
     {  
 //Set the new array
         interpolate<<<block_for_interpolate,dim_for_interpolate>>>(net,net_buff,net_len);  
-        CUDACHECK("interpolate")
 //Doing reduction to find max
         if (iter % 100 == 0 || iter == iteration_cnt-1)
         {
             cudaMemcpy(buff,net_buff, sizeof(double)*net_size, cudaMemcpyDeviceToDevice);
             difference<<<threads,threads>>>(buff,net);
-            CUDACHECK("diff")
-
-            stat = cublasIdamax(handle,net_size,buff,1,&idx);
-            CUBLASCHECK(stat)
+            cub::DeviceReduce::Max(d_temp_storage, temp_storage_bytes, buff, d_out, net_size);
                 
-            cudaMemcpy(&max_acc,&buff[idx-1], sizeof(double), cudaMemcpyDeviceToHost);
+            cudaMemcpy(&max_acc,d_out, sizeof(double), cudaMemcpyDeviceToHost);
             max_acc = std::abs(max_acc);
             if (max_acc<accuracy)
                 break;            
@@ -181,5 +172,4 @@ int main(int argc,char *argv[])
     std::cout<<"Accuracy: "<<max_acc<<"\n";
     
 
-    cublasDestroy(handle);
 }
