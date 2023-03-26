@@ -168,8 +168,11 @@ int main(int argc,char *argv[])
         }
         std::swap(net,net_buff);
     }
+    CUDACHECK("end")
     std::cout<<"Iteration count: "<<iter<<"\n";
     std::cout<<"Accuracy: "<<max_acc<<"\n";
-    
+    cudaFree(net);
+    cudaFree(net_buff);
+    cudaFree(buff);
 
 }
