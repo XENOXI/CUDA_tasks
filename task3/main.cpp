@@ -153,7 +153,7 @@ int main(int argc,char *argv[])
                 
             }
             
-            cudaMemcpy(&max_acc,&buff[idx], sizeof(double), cudaMemcpyDeviceToHost);
+            cudaMemcpy(&max_acc,&buff[idx-1], sizeof(double), cudaMemcpyDeviceToHost);
             max_acc = std::abs(max_acc);
             if (max_acc<accuracy)
                 break;
