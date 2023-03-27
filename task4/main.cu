@@ -126,6 +126,8 @@ int main(int argc,char *argv[])
     double rd = 20;
 
     unsigned int threads=net_len;
+    if (threads%32!=0)
+        throw std::runtime_error("Not a valid net_len");
 
     set_border<<<1,threads>>>(net,net_len,lu,ld,ru,rd);
 
