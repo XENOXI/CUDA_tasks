@@ -82,6 +82,16 @@ __global__ void difference(double* A,double* B)
     A[i] -= B[i];
 }
 
+int NOD(int a, int b)
+{
+    while(a > 0 && b > 0)
+        if(a > b)
+            a %= b;
+        else
+            b %= a;
+    return a + b;
+}
+
 int main(int argc,char *argv[])
 {
 
@@ -126,10 +136,15 @@ int main(int argc,char *argv[])
     double rd = 20;
 
     unsigned int threads=net_len;
+
     if (threads%32!=0)
         throw std::runtime_error("Not a valid net_len");
 
-    set_border<<<1,threads>>>(net,net_len,lu,ld,ru,rd);
+    threads = NOD(threads,1024);
+    unsigned int blocks = net_len/threads;
+
+    set_border<<<blocks,threads>>>(net,net_len,lu,ld,ru,rd);
+    CUDACHECK("set_border")
 
     cudaMemcpy(net_buff,net, sizeof(double)*net_size, cudaMemcpyDeviceToDevice);
 
@@ -148,19 +163,20 @@ int main(int argc,char *argv[])
     cudaMalloc(&d_temp_storage, temp_storage_bytes);
 
     
-    dim3 dim_for_interpolate(32,32);
-    dim3 block_for_interpolate(threads/32,threads/32);
+    dim3 dim_for_interpolate(threads/32,threads/32);
+    dim3 block_for_interpolate(blocks*32,blocks*32);
 
 
     for (iter = 0;iter <iteration_cnt;iter++)
     {  
 //Set the new array
         interpolate<<<block_for_interpolate,dim_for_interpolate>>>(net,net_buff,net_len);  
+
 //Doing reduction to find max
         if (iter % 100 == 0 || iter == iteration_cnt-1)
         {
             cudaMemcpy(buff,net_buff, sizeof(double)*net_size, cudaMemcpyDeviceToDevice);
-            difference<<<threads,threads>>>(buff,net);
+            difference<<<threads*blocks*blocks,threads>>>(buff,net);
             cub::DeviceReduce::Max(d_temp_storage, temp_storage_bytes, buff, d_out, net_size);
                 
             cudaMemcpy(&max_acc,d_out, sizeof(double), cudaMemcpyDeviceToHost);
