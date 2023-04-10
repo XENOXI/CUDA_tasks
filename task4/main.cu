@@ -95,6 +95,7 @@ int NOD(int a, int b)
 int main(int argc,char *argv[])
 {
 
+    
 
     //Init default values
     double accuracy = std::pow(10,-6);
@@ -118,10 +119,6 @@ int main(int argc,char *argv[])
 
     //Init net and buffer
     int net_size = net_len*net_len;
-
-    // __device__ double* buff = new double[net_size];
-    // __device__ double* net = new double[net_size];
-    // __device__ double* net_buff = new double[net_size];
 
     CREATE_DEVICE_ARR(double,buff,net_size)
     CREATE_DEVICE_ARR(double,net,net_size)

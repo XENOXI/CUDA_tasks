@@ -64,7 +64,7 @@ int main(int argc,char *argv[])
     stat = cublasCreate(&handle);
     CUBLASCHECK(stat)
     
-
+    
 
     //Init default values
     double accuracy = std::pow(10,-6);
@@ -102,6 +102,9 @@ int main(int argc,char *argv[])
     
     int idx=0;
     double alpha = -1;
+
+
+
 #pragma acc enter data copyin(net[:net_size],net_len),create(net_buff[:net_size])
     #pragma acc parallel loop
     for (unsigned int i=0;i<net_len;i++)
@@ -134,9 +137,6 @@ int main(int argc,char *argv[])
                 unsigned int id = y*net_len+x;
                 net_buff[id] = (net[id-1] + net[id+1] + net[id-net_len] + net[id+net_len])/4;
             }
-        
-
-
     
 
 //Doing reduction to find max
@@ -150,7 +150,6 @@ int main(int argc,char *argv[])
                 
                 stat = cublasIdamax(handle,net_size,buff,1,&idx);
                 CUBLASCHECK(stat)
-                
             }
             
             cudaMemcpy(&max_acc,&buff[idx-1], sizeof(double), cudaMemcpyDeviceToHost);
@@ -166,7 +165,17 @@ int main(int argc,char *argv[])
     }
     std::cout<<"Iteration count: "<<iter<<"\n";
     std::cout<<"Accuracy: "<<max_acc<<"\n";
-    
+// #pragma acc data present(net[:net_size],net_buff[:net_size])
+// #pragma acc host_data use_device(net)
+//     cudaMemcpy(net_buff,net, net_size*sizeof(double), cudaMemcpyDeviceToHost);
+//     for (int i =0;i<15;i++)
+//     {
+//         for (int j =0;j<15;j++)
+//             std::cout<<net_buff[i*15+j]<<" ";
+//         std::cout<<"\n";
+//     }
+
+
 
 #pragma acc exit data delete(net[:net_size],net_buff[:net_size])
     cublasDestroy(handle);
