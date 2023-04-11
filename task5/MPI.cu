@@ -120,25 +120,29 @@ int main(int argc,char *argv[])
     }
 
     //Init net and buffer
-    unsigned int start = net_len*rank/threads_cnt;
-    unsigned int end = net_len*(rank+1)/threads_cnt;
-    unsigned int net_len_per_gpu = end-start+1;
+    unsigned int start = net_len*rank/threads_cnt-1;
+    unsigned int end = net_len*(rank+1)/threads_cnt+1;
 
+    if (rank==0)
+        start+=1;
+    if (rank==threads_cnt-1)
+        end-=1;
+
+    unsigned int net_len_per_gpu = end-start;
     if (threads_cnt==1)
-        net_len_per_gpu-=1;
+        net_len_per_gpu=net_len;
     
-    if (rank!=0 && rank != threads_cnt-1)
-        net_len_per_gpu += 1;
-
     unsigned int net_size = net_len_per_gpu*net_len;
     
     double* net_cpu = new double[net_size];
+    memset(net_cpu,0,net_size*sizeof(double));
+
     CREATE_DEVICE_ARR(double,buff,net_size)
     CREATE_DEVICE_ARR(double,net,net_size)
     CREATE_DEVICE_ARR(double,net_buff,net_size)
     CREATE_DEVICE_ARR(double,d_out,1)
 
-    cudaMemset(net,0,sizeof(double)*net_size);
+    
 
     double lu = 10;
     double ru = 20;
@@ -166,6 +170,16 @@ int main(int argc,char *argv[])
         net_cpu[net_len-1 + net_len*i] = (rd-ru)/(net_len-1)*(i+start) + ru;
     }
 
+    // for (int i =0;i<net_len_per_gpu;i++)
+    // {
+    //     std::cout<<rank<<" ";
+    //     for (int j =0;j<net_len;j++)
+    //     {
+    //         std::cout<<net_cpu[i*net_len+j]<<" ";
+    //     }
+    //     std::cout<<std::endl;
+    // }
+
     cudaMemcpy(net,net_cpu, sizeof(double)*net_size, cudaMemcpyHostToDevice);
     cudaMemcpy(net_buff,net_cpu, sizeof(double)*net_size, cudaMemcpyHostToDevice);
 
@@ -190,6 +204,7 @@ int main(int argc,char *argv[])
 //Doing reduction to find max
         if (iter % 100 == 0 || iter == iteration_cnt-1)
         {
+
             cudaMemcpy(buff,net_buff, sizeof(double)*net_size, cudaMemcpyDeviceToDevice);
             difference<<<blocks_x*blocks_y,threads_x>>>(buff,net);
 
@@ -200,7 +215,7 @@ int main(int argc,char *argv[])
             bool is_end = false,boolbuff;
             if (max_acc<accuracy)
                 is_end=true; 
-                
+
 
             if(rank!=0)
             {
@@ -236,7 +251,7 @@ int main(int argc,char *argv[])
     }
     CUDACHECK("end")
 
-
+    std::cout<<max_acc<<" "<<rank<<std::endl;
     if(rank!=0)
         MPI_Send(&max_acc,1,MPI_DOUBLE,0,0,MPI_COMM_WORLD);       
     else
@@ -250,6 +265,21 @@ int main(int argc,char *argv[])
         std::cout<<"Iteration count: "<<iter<<"\n";
         std::cout<<"Accuracy: "<<max_acc<<"\n";
     }
+    MPI_Barrier(MPI_COMM_WORLD);
+    cudaMemcpy(net_cpu,net, net_size*sizeof(double), cudaMemcpyDeviceToHost);
+    double polka = 100000000;
+    for (int j=0;j<rank;j++)
+        for (int i =0;i<1000000;i++)
+            polka = polka/i*i;
+    // for (int i =0;i<net_len_per_gpu;i++)
+    // {
+    //     std::cout<<rank<<" ";
+    //     for (int j =0;j<net_len;j++)
+    //     {
+    //         std::cout<<net_cpu[i*net_len+j]<<" ";
+    //     }
+    //     std::cout<<std::endl;
+    // }
     cudaFree(net);
     cudaFree(net_buff);
     cudaFree(buff);
