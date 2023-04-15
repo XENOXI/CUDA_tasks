@@ -169,7 +169,7 @@ int main(int argc,char *argv[])
     {  
 //Set the new array
         interpolate<<<block_for_interpolate,dim_for_interpolate>>>(net,net_buff,net_len,net_len_per_gpu);  
-        
+        CUDACHECK("end")
 //Doing reduction to find max
         if (iter % 100 == 0 || iter == iteration_cnt-1)
         {
@@ -216,13 +216,13 @@ int main(int argc,char *argv[])
         }
         // if (rank!=threads_cnt-1)
         // {
-        //     MPI_Isend(&net_buff[(net_len_per_gpu-2)*net_len],net_len,MPI_DOUBLE,rank+1,0,MPI_COMM_WORLD,&request);
-        //     MPI_Recv(&net_buff[(net_len_per_gpu-1)*net_len],net_len,MPI_DOUBLE,rank+1,0,MPI_COMM_WORLD,MPI_STATUS_IGNORE);
+        //     MPI_Isend(&net_buff[(net_len_per_gpu-2)*net_len+1],net_len-2,MPI_DOUBLE,rank+1,0,MPI_COMM_WORLD,&request);
+        //     MPI_Recv(&net_buff[(net_len_per_gpu-1)*net_len+1],net_len-2,MPI_DOUBLE,rank+1,0,MPI_COMM_WORLD,MPI_STATUS_IGNORE);
         // }
         // if (rank!=0)
         // {
-        //     MPI_Isend(&net_buff[net_len],net_len,MPI_DOUBLE,rank-1,0,MPI_COMM_WORLD,&request);
-        //     MPI_Recv(net_buff,net_len,MPI_DOUBLE,rank-1,0,MPI_COMM_WORLD,MPI_STATUS_IGNORE);
+        //     MPI_Isend(&net_buff[net_len+1],net_len-2,MPI_DOUBLE,rank-1,0,MPI_COMM_WORLD,&request);
+        //     MPI_Recv(&net_buff[1],net_len-2,MPI_DOUBLE,rank-1,0,MPI_COMM_WORLD,MPI_STATUS_IGNORE);
         // }
         
         std::swap(net,net_buff);
