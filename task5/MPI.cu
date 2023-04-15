@@ -29,35 +29,6 @@ void argpars(Type& arg, std::string& str)
 		throw std::runtime_error("Not a valid argument");
 }
 
-inline double average_neighbours(double* arr,int x,int y,int net_len)
-{
-    int neigh_cnt = 0;
-    double sum = 0;
-    int id = y*net_len+x;
-    if (x > 0)
-    {
-        sum += arr[id-1];
-        neigh_cnt++;
-    }
-    if (x+1 < net_len)
-    {
-        sum += arr[id+1];
-        neigh_cnt++;
-    }
-    if (y > 0)
-    {
-        sum += arr[id-net_len];
-        neigh_cnt++;
-    }
-    if (y+1 < net_len)
-    {
-        sum += arr[id+net_len];
-        neigh_cnt++;
-    }
-    return sum/neigh_cnt;
-}
-
-
 __global__ void interpolate(double* A,double* Anew,unsigned int size_x,unsigned int size_y)
 {
     unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -90,6 +61,7 @@ int main(int argc,char *argv[])
 
     //Init default values
     int rank,threads_cnt;
+    MPI_Request request;
     MPI_Init(&argc,&argv);
     
     MPI_Comm_rank(MPI_COMM_WORLD,&rank);
@@ -100,6 +72,13 @@ int main(int argc,char *argv[])
     if (deviceCount<threads_cnt)
         throw std::runtime_error("Too many MPI threads");
     cudaSetDevice(rank);
+
+    if (rank!=0)
+        cudaDeviceEnablePeerAccess(rank-1,0);
+    if (rank!=threads_cnt-1)
+        cudaDeviceEnablePeerAccess(rank+1,0);
+
+
 
     double accuracy = std::pow(10,-6);
     unsigned int net_len=1024;
@@ -170,16 +149,6 @@ int main(int argc,char *argv[])
         net_cpu[net_len-1 + net_len*i] = (rd-ru)/(net_len-1)*(i+start) + ru;
     }
 
-    // for (int i =0;i<net_len_per_gpu;i++)
-    // {
-    //     std::cout<<rank<<" ";
-    //     for (int j =0;j<net_len;j++)
-    //     {
-    //         std::cout<<net_cpu[i*net_len+j]<<" ";
-    //     }
-    //     std::cout<<std::endl;
-    // }
-
     cudaMemcpy(net,net_cpu, sizeof(double)*net_size, cudaMemcpyHostToDevice);
     cudaMemcpy(net_buff,net_cpu, sizeof(double)*net_size, cudaMemcpyHostToDevice);
 
@@ -200,7 +169,7 @@ int main(int argc,char *argv[])
     {  
 //Set the new array
         interpolate<<<block_for_interpolate,dim_for_interpolate>>>(net,net_buff,net_len,net_len_per_gpu);  
-        
+        CUDACHECK("interpolate")
 //Doing reduction to find max
         if (iter % 100 == 0 || iter == iteration_cnt-1)
         {
@@ -238,20 +207,19 @@ int main(int argc,char *argv[])
         }
         if (rank!=threads_cnt-1)
         {
-            MPI_Send(&net_buff[(net_len_per_gpu-2)*net_len],net_len,MPI_DOUBLE,rank+1,0,MPI_COMM_WORLD);
+            MPI_Isend(&net_buff[(net_len_per_gpu-2)*net_len],net_len,MPI_DOUBLE,rank+1,0,MPI_COMM_WORLD,&request);
             MPI_Recv(&net_buff[(net_len_per_gpu-1)*net_len],net_len,MPI_DOUBLE,rank+1,0,MPI_COMM_WORLD,MPI_STATUS_IGNORE);
         }
         if (rank!=0)
         {
+            MPI_Isend(&net_buff[net_len],net_len,MPI_DOUBLE,rank-1,0,MPI_COMM_WORLD,&request);
             MPI_Recv(net_buff,net_len,MPI_DOUBLE,rank-1,0,MPI_COMM_WORLD,MPI_STATUS_IGNORE);
-            MPI_Send(&net_buff[net_len],net_len,MPI_DOUBLE,rank-1,0,MPI_COMM_WORLD);
         }
-        std::swap(net,net_buff);
         
+        std::swap(net,net_buff);
+              
     }
     CUDACHECK("end")
-
-    std::cout<<max_acc<<" "<<rank<<std::endl;
     if(rank!=0)
         MPI_Send(&max_acc,1,MPI_DOUBLE,0,0,MPI_COMM_WORLD);       
     else
@@ -265,21 +233,8 @@ int main(int argc,char *argv[])
         std::cout<<"Iteration count: "<<iter<<"\n";
         std::cout<<"Accuracy: "<<max_acc<<"\n";
     }
-    MPI_Barrier(MPI_COMM_WORLD);
-    cudaMemcpy(net_cpu,net, net_size*sizeof(double), cudaMemcpyDeviceToHost);
-    double polka = 100000000;
-    for (int j=0;j<rank;j++)
-        for (int i =0;i<1000000;i++)
-            polka = polka/i*i;
-    // for (int i =0;i<net_len_per_gpu;i++)
-    // {
-    //     std::cout<<rank<<" ";
-    //     for (int j =0;j<net_len;j++)
-    //     {
-    //         std::cout<<net_cpu[i*net_len+j]<<" ";
-    //     }
-    //     std::cout<<std::endl;
-    // }
+
+
     cudaFree(net);
     cudaFree(net_buff);
     cudaFree(buff);
