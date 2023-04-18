@@ -6,11 +6,21 @@
 #include <exception>
 #include <cstring>
 #include <cuda_runtime.h>
+#include "nccl.h"
 #include <cuda.h>
 #include <cub/cub.cuh>
 
 #define CREATE_DEVICE_ARR(type,arg,size) type* arg; cudaMalloc((void**)&arg, sizeof(type) * size);
 #define CUDACHECK(name) if (cudaGetLastError() != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) throw std::runtime_error(name);
+#define NCCLCHECK(cmd) do {                               \
+    ncclResult_t r = cmd;                             \
+    if (r!= ncclSuccess) {                            \
+      printf("Failed, NCCL error %s:%d '%s'\n",       \
+          __FILE__,__LINE__,ncclGetErrorString(r));   \
+      exit(EXIT_FAILURE);                             \
+    }}                                                \
+    while(0)
+  
 
 template <typename Type>
 std::istream& operator>>(std::istream& i, const Type& arg) { return i; }
@@ -55,35 +65,75 @@ int NOD(int a, int b)
     return a + b;
 }
 
+__global__ void accuracy_check(double* real_accuracy,double needed_accuracy,char* is_end,int deviceCount)
+{
+    is_end[0]=true;
+    //printf("%f %f\n",real_accuracy[0],real_accuracy[1]);
+    for (int i=0;i<deviceCount;i++)
+    {
+        if (abs(real_accuracy[i])>needed_accuracy)
+        {  
+            is_end[0]=false;
+            break;
+        }
+    }
+        
+}
+
+__global__ void print(double* acc)
+{
+    printf("%f\n",acc[0]);
+}
+
+__global__ void small_max(double* real_accuracy,int deviceCount)
+{
+    double res=real_accuracy[0];
+    for (int i =1;i<deviceCount;i++)
+    {
+        if (real_accuracy[i]>res)
+            res = real_accuracy[i];
+    }
+    real_accuracy[0]=res;
+}
+
 int main(int argc,char *argv[])
 {
-
-
-    //Init default values
+    //MPI init   
     int rank,threads_cnt;
-    MPI_Request request;
     MPI_Init(&argc,&argv);
     
     MPI_Comm_rank(MPI_COMM_WORLD,&rank);
     MPI_Comm_size(MPI_COMM_WORLD,&threads_cnt);
 
+    //CUDA check
     int deviceCount;
     cudaGetDeviceCount(&deviceCount);
     if (deviceCount<threads_cnt)
         throw std::runtime_error("Too many MPI threads");
     cudaSetDevice(rank);
 
+    //Stream init
+    cudaStream_t s;
+    cudaStreamCreate(&s);
+
+    //Set p2p access
     if (rank!=0)
         cudaDeviceEnablePeerAccess(rank-1,0);
     if (rank!=threads_cnt-1)
         cudaDeviceEnablePeerAccess(rank+1,0);
 
-
-
     double accuracy = std::pow(10,-6);
     unsigned int net_len=1024;
     unsigned int iteration_cnt = std::pow(10,6);
     
+    //NCCL init 
+    ncclUniqueId id;
+    ncclComm_t comm;
+    if (rank == 0) ncclGetUniqueId(&id);
+    MPI_Bcast(&id, sizeof(id), MPI_BYTE, 0, MPI_COMM_WORLD);
+    ncclCommInitRank(&comm, threads_cnt, id, rank);
+    
+
     //Reading arguments
     for (int i =1;i<argc-1;i+=2)
     {
@@ -119,15 +169,20 @@ int main(int argc,char *argv[])
     CREATE_DEVICE_ARR(double,buff,net_size)
     CREATE_DEVICE_ARR(double,net,net_size)
     CREATE_DEVICE_ARR(double,net_buff,net_size)
-    CREATE_DEVICE_ARR(double,d_out,1)
-
+    CREATE_DEVICE_ARR(char,is_end,1)
+    double* d_out; 
+    if (rank==0)
+        cudaMalloc((void**)&d_out, sizeof(double) * threads_cnt);
+    else
+        cudaMalloc((void**)&d_out, sizeof(double) * 1);
     
-
+    //Corners
     double lu = 10;
     double ru = 20;
     double ld = 30;
     double rd = 20;
 
+    //Threads and blocks init
     unsigned int threads_x=NOD(net_len,1024);
     unsigned int blocks_y = net_len_per_gpu;
     unsigned int blocks_x = net_len/threads_x;
@@ -135,6 +190,7 @@ int main(int argc,char *argv[])
     dim3 dim_for_interpolate(threads_x,1);
     dim3 block_for_interpolate(blocks_x,blocks_y);
 
+    //Fill default values
     if (rank==0)
         for (int i =0;i<net_len;i++)
             net_cpu[i] = (ru-lu)/(net_len-1)*i + lu;
@@ -152,9 +208,7 @@ int main(int argc,char *argv[])
     cudaMemcpy(net,net_cpu, sizeof(double)*net_size, cudaMemcpyHostToDevice);
     cudaMemcpy(net_buff,net_cpu, sizeof(double)*net_size, cudaMemcpyHostToDevice);
 
-    unsigned int iter;
-    double max_acc=0;
-
+    //Cub init
     void     *d_temp_storage = NULL;
     size_t   temp_storage_bytes = 0;
 
@@ -163,86 +217,75 @@ int main(int argc,char *argv[])
     cudaMalloc(&d_temp_storage, temp_storage_bytes);
 
 
+    unsigned int iter;
+    double max_acc=0;
+    char is_end_cpu=false;
 
+    NCCLCHECK(ncclGroupStart());
 //Solving
     for (iter = 0;iter <iteration_cnt;iter++)
     {  
 //Set the new array
-        interpolate<<<block_for_interpolate,dim_for_interpolate>>>(net,net_buff,net_len,net_len_per_gpu);  
-        CUDACHECK("end")
+        interpolate<<<block_for_interpolate,dim_for_interpolate,0,s>>>(net,net_buff,net_len,net_len_per_gpu);  
 //Doing reduction to find max
         if (iter % 100 == 0 || iter == iteration_cnt-1)
         {
             cudaMemcpy(buff,net_buff, sizeof(double)*net_size, cudaMemcpyDeviceToDevice);
-            difference<<<blocks_x*blocks_y,threads_x>>>(buff,net);
+            difference<<<blocks_x*blocks_y,threads_x,0,s>>>(buff,net);
 
-            cub::DeviceReduce::Max(d_temp_storage, temp_storage_bytes, buff, d_out, net_size);
-            cudaMemcpy(&max_acc,d_out, sizeof(double), cudaMemcpyDeviceToHost);
-            
-            max_acc = std::abs(max_acc);
-            bool is_end = false,boolbuff;
-            if (max_acc<accuracy)
-                is_end=true; 
-
-
+            cub::DeviceReduce::Max(d_temp_storage, temp_storage_bytes, buff, d_out, net_size,s);
+            // print<<<1,1,0,s>>>(d_out);
+            // cudaStreamSynchronize(s);
             if(rank!=0)
             {
-                MPI_Send(&is_end,1,MPI_C_BOOL,0,0,MPI_COMM_WORLD);
-                MPI_Recv(&is_end,1,MPI_C_BOOL,0,0,MPI_COMM_WORLD,MPI_STATUS_IGNORE);
+                NCCLCHECK(ncclSend(d_out,1,ncclDouble,0,comm,s));
+                NCCLCHECK(ncclRecv(is_end,1,ncclChar,0,comm,s));
             }         
             else
             {
                 for (int i=1;i<threads_cnt;i++)
-                {
-                    MPI_Recv(&boolbuff,1,MPI_C_BOOL,i,0,MPI_COMM_WORLD,MPI_STATUS_IGNORE);
-                    is_end&=boolbuff;
-                }
+                    NCCLCHECK(ncclRecv(d_out+i,1,ncclDouble,0,comm,s));
+                // cudaStreamSynchronize(s);
+                accuracy_check<<<1,1,0,s>>>(d_out,accuracy,is_end,threads_cnt);
                 for (int i=1;i<threads_cnt;i++)
-                    MPI_Send(&is_end,1,MPI_C_BOOL,i,0,MPI_COMM_WORLD);
+                    NCCLCHECK(ncclSend(is_end,1,ncclChar,i,comm,s));
             }
-            if(is_end)
+            cudaMemcpy(&is_end_cpu,is_end,sizeof(char),cudaMemcpyDeviceToHost);
+            if(is_end_cpu)
                 break; 
-            
                                  
         }
-        // if (rank!=threads_cnt-1)
-        // {
-        //     cudaMemcpyPeer(&net_buff[(net_len_per_gpu-1)*net_len+1],rank+1,&net_buff[(net_len_per_gpu-2)*net_len+1],rank,sizeof(double)*(net_len-2));
-        // }
-        // if (rank!=0)
-        // {
-        //     cudaMemcpyPeer(&net_buff[1],rank-1,&net_buff[net_len+1],rank,sizeof(double)*(net_len-2));
-        // }
+
         if (rank!=threads_cnt-1)
         {
-            MPI_Isend(&net_buff[(net_len_per_gpu-2)*net_len+1],net_len-2,MPI_DOUBLE,rank+1,0,MPI_COMM_WORLD,&request);
-            MPI_Recv(&net_buff[(net_len_per_gpu-1)*net_len+1],net_len-2,MPI_DOUBLE,rank+1,0,MPI_COMM_WORLD,MPI_STATUS_IGNORE);
+            NCCLCHECK(ncclSend(&net_buff[(net_len_per_gpu-2)*net_len+1],net_len-2,ncclDouble,rank+1,comm,s));
+            NCCLCHECK(ncclRecv(&net_buff[(net_len_per_gpu-1)*net_len+1],net_len-2,ncclDouble,rank+1,comm,s));
         }
         if (rank!=0)
         {
-            MPI_Isend(&net_buff[net_len+1],net_len-2,MPI_DOUBLE,rank-1,0,MPI_COMM_WORLD,&request);
-            MPI_Recv(&net_buff[1],net_len-2,MPI_DOUBLE,rank-1,0,MPI_COMM_WORLD,MPI_STATUS_IGNORE);
+            NCCLCHECK(ncclRecv(&net_buff[1],net_len-2,ncclDouble,rank-1,comm,s));
+            NCCLCHECK(ncclSend(&net_buff[net_len+1],net_len-2,ncclDouble,rank-1,comm,s)); 
         }
+        
         
         std::swap(net,net_buff);
               
     }
     CUDACHECK("end")
-    if(rank!=0)
-        MPI_Send(&max_acc,1,MPI_DOUBLE,0,0,MPI_COMM_WORLD);       
-    else
+    
+    if (rank==0)
     {
-        double max_acc_buff;
-        for (int i=1;i<threads_cnt;i++)
-        {
-            MPI_Recv(&max_acc_buff,1,MPI_DOUBLE,i,0,MPI_COMM_WORLD,MPI_STATUS_IGNORE);
-            max_acc = std::max(max_acc,max_acc_buff);
-        }
+        small_max<<<1,1,0,s>>>(d_out,threads_cnt);
+        cudaMemcpy(&max_acc,d_out,sizeof(double),cudaMemcpyDeviceToHost);
         std::cout<<"Iteration count: "<<iter<<"\n";
         std::cout<<"Accuracy: "<<max_acc<<"\n";
     }
-    // MPI_Barrier(MPI_COMM_WORLD);
-    // cudaMemcpy(net_cpu,net, net_size*sizeof(double), cudaMemcpyDeviceToHost);
+    
+    
+    MPI_Barrier(MPI_COMM_WORLD);
+    cudaMemcpy(net_cpu,net, net_size*sizeof(double), cudaMemcpyDeviceToHost);
+
+    //Polka is needed to delay processes
     // double polka = 100000000;
     // for (int j=0;j<rank;j++)
     //     for (int i =0;i<1000000;i++)
@@ -258,11 +301,14 @@ int main(int argc,char *argv[])
     //     std::cout<<std::endl;
     // }
 
+    MPI_Barrier(MPI_COMM_WORLD);
+    NCCLCHECK(ncclGroupEnd());
     cudaFree(net);
     cudaFree(net_buff);
     cudaFree(buff);
     cudaFree(d_out);
     delete[] net_cpu;
+    ncclCommDestroy(comm);
     MPI_Finalize();
     return 0;
 }
