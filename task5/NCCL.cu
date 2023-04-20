@@ -68,7 +68,6 @@ int NOD(int a, int b)
 __global__ void accuracy_check(double* real_accuracy,double needed_accuracy,char* is_end,int deviceCount)
 {
     is_end[0]=true;
-    //printf("%f %f\n",real_accuracy[0],real_accuracy[1]);
     for (int i=0;i<deviceCount;i++)
     {
         if (abs(real_accuracy[i])>needed_accuracy)
@@ -78,11 +77,6 @@ __global__ void accuracy_check(double* real_accuracy,double needed_accuracy,char
         }
     }
         
-}
-
-__global__ void print(double* acc)
-{
-    printf("%f\n",acc[0]);
 }
 
 __global__ void small_max(double* real_accuracy,int deviceCount)
@@ -105,7 +99,7 @@ int main(int argc,char *argv[])
     MPI_Comm_rank(MPI_COMM_WORLD,&rank);
     MPI_Comm_size(MPI_COMM_WORLD,&threads_cnt);
 
-    //CUDA check
+    //CUDA check device count
     int deviceCount;
     cudaGetDeviceCount(&deviceCount);
     if (deviceCount<threads_cnt)
@@ -122,6 +116,7 @@ int main(int argc,char *argv[])
     if (rank!=threads_cnt-1)
         cudaDeviceEnablePeerAccess(rank+1,0);
 
+    //default settings
     double accuracy = std::pow(10,-6);
     unsigned int net_len=1024;
     unsigned int iteration_cnt = std::pow(10,6);
@@ -149,6 +144,10 @@ int main(int argc,char *argv[])
     }
 
     //Init net and buffer
+
+    //Matrix is divided so that each process has about net_len/threads_cnt rows +
+    // 2 rows if rank not first or last
+    // 1 row if first or last
     unsigned int start = net_len*rank/threads_cnt-1;
     unsigned int end = net_len*(rank+1)/threads_cnt+1;
 
@@ -211,98 +210,100 @@ int main(int argc,char *argv[])
     //Cub init
     void     *d_temp_storage = NULL;
     size_t   temp_storage_bytes = 0;
-
     cub::DeviceReduce::Max(d_temp_storage, temp_storage_bytes, buff, d_out, net_size);
-// Allocate temporary storage
     cudaMalloc(&d_temp_storage, temp_storage_bytes);
 
 
+    //Init cycle values
     unsigned int iter;
     double max_acc=0;
     char is_end_cpu=false;
 
-    NCCLCHECK(ncclGroupStart());
-//Solving
+
+    //Start solving
     for (iter = 0;iter <iteration_cnt;iter++)
     {  
-//Set the new array
+        //Set the new array
         interpolate<<<block_for_interpolate,dim_for_interpolate,0,s>>>(net,net_buff,net_len,net_len_per_gpu);  
-//Doing reduction to find max
+
+        //Doing reduction to find max accurracy
         if (iter % 100 == 0 || iter == iteration_cnt-1)
         {
             cudaMemcpy(buff,net_buff, sizeof(double)*net_size, cudaMemcpyDeviceToDevice);
             difference<<<blocks_x*blocks_y,threads_x,0,s>>>(buff,net);
-
             cub::DeviceReduce::Max(d_temp_storage, temp_storage_bytes, buff, d_out, net_size,s);
-            // print<<<1,1,0,s>>>(d_out);
-            // cudaStreamSynchronize(s);
+            
+            
             if(rank!=0)
             {
+                //Sending all accuracy to first GPU
+                NCCLCHECK(ncclGroupStart());
                 NCCLCHECK(ncclSend(d_out,1,ncclDouble,0,comm,s));
+                NCCLCHECK(ncclGroupEnd());
+
+                //Getting check value
+                NCCLCHECK(ncclGroupStart());
                 NCCLCHECK(ncclRecv(is_end,1,ncclChar,0,comm,s));
+                NCCLCHECK(ncclGroupEnd());
             }         
             else
             {
+                //Getting all results
+                NCCLCHECK(ncclGroupStart());
                 for (int i=1;i<threads_cnt;i++)
-                    NCCLCHECK(ncclRecv(d_out+i,1,ncclDouble,0,comm,s));
-                // cudaStreamSynchronize(s);
+                    NCCLCHECK(ncclRecv(d_out+i,1,ncclDouble,i,comm,s));
+                NCCLCHECK(ncclGroupEnd());
+
                 accuracy_check<<<1,1,0,s>>>(d_out,accuracy,is_end,threads_cnt);
+
+                //Sending char value which means solving end
+                NCCLCHECK(ncclGroupStart());
                 for (int i=1;i<threads_cnt;i++)
                     NCCLCHECK(ncclSend(is_end,1,ncclChar,i,comm,s));
+                NCCLCHECK(ncclGroupEnd());
             }
+           
             cudaMemcpy(&is_end_cpu,is_end,sizeof(char),cudaMemcpyDeviceToHost);
             if(is_end_cpu)
                 break; 
                                  
         }
 
+        //Exchanging matrix rows between GPUs
+        //This send penultimate and second rows 
+        //and get last and fisrt rows 
+        NCCLCHECK(ncclGroupStart());
         if (rank!=threads_cnt-1)
         {
+            
             NCCLCHECK(ncclSend(&net_buff[(net_len_per_gpu-2)*net_len+1],net_len-2,ncclDouble,rank+1,comm,s));
             NCCLCHECK(ncclRecv(&net_buff[(net_len_per_gpu-1)*net_len+1],net_len-2,ncclDouble,rank+1,comm,s));
         }
         if (rank!=0)
         {
-            NCCLCHECK(ncclRecv(&net_buff[1],net_len-2,ncclDouble,rank-1,comm,s));
             NCCLCHECK(ncclSend(&net_buff[net_len+1],net_len-2,ncclDouble,rank-1,comm,s)); 
+            NCCLCHECK(ncclRecv(&net_buff[1],net_len-2,ncclDouble,rank-1,comm,s));
         }
         
-        
+        NCCLCHECK(ncclGroupEnd());
         std::swap(net,net_buff);
               
     }
     CUDACHECK("end")
     
+
+    //Printing results
     if (rank==0)
     {
         small_max<<<1,1,0,s>>>(d_out,threads_cnt);
         cudaMemcpy(&max_acc,d_out,sizeof(double),cudaMemcpyDeviceToHost);
         std::cout<<"Iteration count: "<<iter<<"\n";
         std::cout<<"Accuracy: "<<max_acc<<"\n";
+        CUDACHECK("printing results")
     }
-    
-    
-    MPI_Barrier(MPI_COMM_WORLD);
-    cudaMemcpy(net_cpu,net, net_size*sizeof(double), cudaMemcpyDeviceToHost);
 
-    //Polka is needed to delay processes
-    // double polka = 100000000;
-    // for (int j=0;j<rank;j++)
-    //     for (int i =0;i<1000000;i++)
-    //         polka = polka/i*i;
 
-    // for (int i =0;i<net_len_per_gpu;i++)
-    // {
-    //     std::cout<<rank<<" ";
-    //     for (int j =0;j<net_len;j++)
-    //     {
-    //         std::cout<<net_cpu[i*net_len+j]<<" ";
-    //     }
-    //     std::cout<<std::endl;
-    // }
-
-    MPI_Barrier(MPI_COMM_WORLD);
-    NCCLCHECK(ncclGroupEnd());
+    //Finishing program
     cudaFree(net);
     cudaFree(net_buff);
     cudaFree(buff);

@@ -67,19 +67,21 @@ int main(int argc,char *argv[])
     MPI_Comm_rank(MPI_COMM_WORLD,&rank);
     MPI_Comm_size(MPI_COMM_WORLD,&threads_cnt);
 
+    //CUDA check device count
     int deviceCount;
     cudaGetDeviceCount(&deviceCount);
     if (deviceCount<threads_cnt)
         throw std::runtime_error("Too many MPI threads");
     cudaSetDevice(rank);
 
+    //Set p2p access
     if (rank!=0)
         cudaDeviceEnablePeerAccess(rank-1,0);
     if (rank!=threads_cnt-1)
         cudaDeviceEnablePeerAccess(rank+1,0);
 
 
-
+    //default settings
     double accuracy = std::pow(10,-6);
     unsigned int net_len=1024;
     unsigned int iteration_cnt = std::pow(10,6);
@@ -122,12 +124,13 @@ int main(int argc,char *argv[])
     CREATE_DEVICE_ARR(double,d_out,1)
 
     
-
+    //Corners
     double lu = 10;
     double ru = 20;
     double ld = 30;
     double rd = 20;
 
+    //Threads and blocks init
     unsigned int threads_x=NOD(net_len,1024);
     unsigned int blocks_y = net_len_per_gpu;
     unsigned int blocks_x = net_len/threads_x;
@@ -135,6 +138,7 @@ int main(int argc,char *argv[])
     dim3 dim_for_interpolate(threads_x,1);
     dim3 block_for_interpolate(blocks_x,blocks_y);
 
+    //Fill default values
     if (rank==0)
         for (int i =0;i<net_len;i++)
             net_cpu[i] = (ru-lu)/(net_len-1)*i + lu;
@@ -152,25 +156,26 @@ int main(int argc,char *argv[])
     cudaMemcpy(net,net_cpu, sizeof(double)*net_size, cudaMemcpyHostToDevice);
     cudaMemcpy(net_buff,net_cpu, sizeof(double)*net_size, cudaMemcpyHostToDevice);
 
+
+    //Init cycle values
     unsigned int iter;
     double max_acc=0;
 
+    //Cub init
     void     *d_temp_storage = NULL;
     size_t   temp_storage_bytes = 0;
-
     cub::DeviceReduce::Max(d_temp_storage, temp_storage_bytes, buff, d_out, net_size);
-// Allocate temporary storage
     cudaMalloc(&d_temp_storage, temp_storage_bytes);
 
 
 
-//Solving
+    //Start solving
     for (iter = 0;iter <iteration_cnt;iter++)
     {  
-//Set the new array
+        //Set the new array
         interpolate<<<block_for_interpolate,dim_for_interpolate>>>(net,net_buff,net_len,net_len_per_gpu);  
         CUDACHECK("end")
-//Doing reduction to find max
+        //Doing reduction to find max
         if (iter % 100 == 0 || iter == iteration_cnt-1)
         {
             cudaMemcpy(buff,net_buff, sizeof(double)*net_size, cudaMemcpyDeviceToDevice);
@@ -179,6 +184,7 @@ int main(int argc,char *argv[])
             cub::DeviceReduce::Max(d_temp_storage, temp_storage_bytes, buff, d_out, net_size);
             cudaMemcpy(&max_acc,d_out, sizeof(double), cudaMemcpyDeviceToHost);
             
+            //Setting check value on each rank
             max_acc = std::abs(max_acc);
             bool is_end = false,boolbuff;
             if (max_acc<accuracy)
@@ -187,16 +193,20 @@ int main(int argc,char *argv[])
 
             if(rank!=0)
             {
+                //Sending check value to first rank
                 MPI_Send(&is_end,1,MPI_C_BOOL,0,0,MPI_COMM_WORLD);
+                //Getting check value
                 MPI_Recv(&is_end,1,MPI_C_BOOL,0,0,MPI_COMM_WORLD,MPI_STATUS_IGNORE);
             }         
             else
             {
+                //Getting all results and set check value
                 for (int i=1;i<threads_cnt;i++)
                 {
                     MPI_Recv(&boolbuff,1,MPI_C_BOOL,i,0,MPI_COMM_WORLD,MPI_STATUS_IGNORE);
                     is_end&=boolbuff;
                 }
+                //Sending it back
                 for (int i=1;i<threads_cnt;i++)
                     MPI_Send(&is_end,1,MPI_C_BOOL,i,0,MPI_COMM_WORLD);
             }
@@ -205,14 +215,10 @@ int main(int argc,char *argv[])
             
                                  
         }
-        // if (rank!=threads_cnt-1)
-        // {
-        //     cudaMemcpyPeer(&net_buff[(net_len_per_gpu-1)*net_len+1],rank+1,&net_buff[(net_len_per_gpu-2)*net_len+1],rank,sizeof(double)*(net_len-2));
-        // }
-        // if (rank!=0)
-        // {
-        //     cudaMemcpyPeer(&net_buff[1],rank-1,&net_buff[net_len+1],rank,sizeof(double)*(net_len-2));
-        // }
+        
+        //Exchanging matrix rows between ranks
+        //This send penultimate and second rows 
+        //and get last and fisrt rows
         if (rank!=threads_cnt-1)
         {
             MPI_Isend(&net_buff[(net_len_per_gpu-2)*net_len+1],net_len-2,MPI_DOUBLE,rank+1,0,MPI_COMM_WORLD,&request);
@@ -228,6 +234,8 @@ int main(int argc,char *argv[])
               
     }
     CUDACHECK("end")
+
+    //Getting results to first process and printing it
     if(rank!=0)
         MPI_Send(&max_acc,1,MPI_DOUBLE,0,0,MPI_COMM_WORLD);       
     else
@@ -241,23 +249,8 @@ int main(int argc,char *argv[])
         std::cout<<"Iteration count: "<<iter<<"\n";
         std::cout<<"Accuracy: "<<max_acc<<"\n";
     }
-    // MPI_Barrier(MPI_COMM_WORLD);
-    // cudaMemcpy(net_cpu,net, net_size*sizeof(double), cudaMemcpyDeviceToHost);
-    // double polka = 100000000;
-    // for (int j=0;j<rank;j++)
-    //     for (int i =0;i<1000000;i++)
-    //         polka = polka/i*i;
 
-    // for (int i =0;i<net_len_per_gpu;i++)
-    // {
-    //     std::cout<<rank<<" ";
-    //     for (int j =0;j<net_len;j++)
-    //     {
-    //         std::cout<<net_cpu[i*net_len+j]<<" ";
-    //     }
-    //     std::cout<<std::endl;
-    // }
-
+    //Finishing program
     cudaFree(net);
     cudaFree(net_buff);
     cudaFree(buff);
