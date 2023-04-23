@@ -65,31 +65,6 @@ int NOD(int a, int b)
     return a + b;
 }
 
-__global__ void accuracy_check(double* real_accuracy,double needed_accuracy,char* is_end,int deviceCount)
-{
-    is_end[0]=true;
-    for (int i=0;i<deviceCount;i++)
-    {
-        if (abs(real_accuracy[i])>needed_accuracy)
-        {  
-            is_end[0]=false;
-            break;
-        }
-    }
-        
-}
-
-__global__ void small_max(double* real_accuracy,int deviceCount)
-{
-    double res=real_accuracy[0];
-    for (int i =1;i<deviceCount;i++)
-    {
-        if (real_accuracy[i]>res)
-            res = real_accuracy[i];
-    }
-    real_accuracy[0]=res;
-}
-
 int main(int argc,char *argv[])
 {
     //MPI init   
@@ -169,11 +144,8 @@ int main(int argc,char *argv[])
     CREATE_DEVICE_ARR(double,net,net_size)
     CREATE_DEVICE_ARR(double,net_buff,net_size)
     CREATE_DEVICE_ARR(char,is_end,1)
-    double* d_out; 
-    if (rank==0)
-        cudaMalloc((void**)&d_out, sizeof(double) * threads_cnt);
-    else
-        cudaMalloc((void**)&d_out, sizeof(double) * 1);
+    CREATE_DEVICE_ARR(double,d_out,1)
+    CREATE_DEVICE_ARR(double,d_in,1)
     
     //Corners
     double lu = 10;
@@ -217,8 +189,6 @@ int main(int argc,char *argv[])
     //Init cycle values
     unsigned int iter;
     double max_acc=0;
-    char is_end_cpu=false;
-
 
     //Start solving
     for (iter = 0;iter <iteration_cnt;iter++)
@@ -226,47 +196,23 @@ int main(int argc,char *argv[])
         //Set the new array
         interpolate<<<block_for_interpolate,dim_for_interpolate,0,s>>>(net,net_buff,net_len,net_len_per_gpu);  
 
-        //Doing reduction to find max accurracy
+        //Doing reduction to find max accuracy
         if (iter % 100 == 0 || iter == iteration_cnt-1)
         {
             cudaMemcpy(buff,net_buff, sizeof(double)*net_size, cudaMemcpyDeviceToDevice);
             difference<<<blocks_x*blocks_y,threads_x,0,s>>>(buff,net);
             cub::DeviceReduce::Max(d_temp_storage, temp_storage_bytes, buff, d_out, net_size,s);
             
-            
-            if(rank!=0)
-            {
-                //Sending all accuracy to first GPU
-                NCCLCHECK(ncclGroupStart());
-                NCCLCHECK(ncclSend(d_out,1,ncclDouble,0,comm,s));
-                NCCLCHECK(ncclGroupEnd());
+            //Sending max accuracy to all GPU
+            NCCLCHECK(ncclGroupStart());
+            NCCLCHECK(ncclAllReduce((void*)d_out,(void*)d_in,1,ncclDouble,ncclMax,comm,s));
+            NCCLCHECK(ncclGroupEnd());
 
-                //Getting check value
-                NCCLCHECK(ncclGroupStart());
-                NCCLCHECK(ncclRecv(is_end,1,ncclChar,0,comm,s));
-                NCCLCHECK(ncclGroupEnd());
-            }         
-            else
-            {
-                //Getting all results
-                NCCLCHECK(ncclGroupStart());
-                for (int i=1;i<threads_cnt;i++)
-                    NCCLCHECK(ncclRecv(d_out+i,1,ncclDouble,i,comm,s));
-                NCCLCHECK(ncclGroupEnd());
-
-                accuracy_check<<<1,1,0,s>>>(d_out,accuracy,is_end,threads_cnt);
-
-                //Sending char value which means solving end
-                NCCLCHECK(ncclGroupStart());
-                for (int i=1;i<threads_cnt;i++)
-                    NCCLCHECK(ncclSend(is_end,1,ncclChar,i,comm,s));
-                NCCLCHECK(ncclGroupEnd());
-            }
-           
-            cudaMemcpy(&is_end_cpu,is_end,sizeof(char),cudaMemcpyDeviceToHost);
-            if(is_end_cpu)
-                break; 
-                                 
+            //Sending accuracy to host
+            cudaMemcpyAsync(&max_acc,d_in,sizeof(double),cudaMemcpyDeviceToHost,s);
+            cudaStreamSynchronize(s);
+            if(max_acc<accuracy)
+                break;           
         }
 
         //Exchanging matrix rows between GPUs
@@ -295,11 +241,8 @@ int main(int argc,char *argv[])
     //Printing results
     if (rank==0)
     {
-        small_max<<<1,1,0,s>>>(d_out,threads_cnt);
-        cudaMemcpy(&max_acc,d_out,sizeof(double),cudaMemcpyDeviceToHost);
         std::cout<<"Iteration count: "<<iter<<"\n";
         std::cout<<"Accuracy: "<<max_acc<<"\n";
-        CUDACHECK("printing results")
     }
 
 

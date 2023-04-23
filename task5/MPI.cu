@@ -159,7 +159,7 @@ int main(int argc,char *argv[])
 
     //Init cycle values
     unsigned int iter;
-    double max_acc=0;
+    double max_acc=0,max_acc_buff;
 
     //Cub init
     void     *d_temp_storage = NULL;
@@ -181,36 +181,15 @@ int main(int argc,char *argv[])
             cudaMemcpy(buff,net_buff, sizeof(double)*net_size, cudaMemcpyDeviceToDevice);
             difference<<<blocks_x*blocks_y,threads_x>>>(buff,net);
 
+            //Finding max accuracy
             cub::DeviceReduce::Max(d_temp_storage, temp_storage_bytes, buff, d_out, net_size);
             cudaMemcpy(&max_acc,d_out, sizeof(double), cudaMemcpyDeviceToHost);
-            
-            //Setting check value on each rank
             max_acc = std::abs(max_acc);
-            bool is_end = false,boolbuff;
-            if (max_acc<accuracy)
-                is_end=true; 
 
+            //Sending max accuracy to all process
+            MPI_Allreduce((void*)&max_acc,(void*)&max_acc_buff,1,MPI_DOUBLE,MPI_MAX,MPI_COMM_WORLD);
 
-            if(rank!=0)
-            {
-                //Sending check value to first rank
-                MPI_Send(&is_end,1,MPI_C_BOOL,0,0,MPI_COMM_WORLD);
-                //Getting check value
-                MPI_Recv(&is_end,1,MPI_C_BOOL,0,0,MPI_COMM_WORLD,MPI_STATUS_IGNORE);
-            }         
-            else
-            {
-                //Getting all results and set check value
-                for (int i=1;i<threads_cnt;i++)
-                {
-                    MPI_Recv(&boolbuff,1,MPI_C_BOOL,i,0,MPI_COMM_WORLD,MPI_STATUS_IGNORE);
-                    is_end&=boolbuff;
-                }
-                //Sending it back
-                for (int i=1;i<threads_cnt;i++)
-                    MPI_Send(&is_end,1,MPI_C_BOOL,i,0,MPI_COMM_WORLD);
-            }
-            if(is_end)
+            if(max_acc<accuracy)
                 break; 
             
                                  
