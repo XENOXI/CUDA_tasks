@@ -8,6 +8,15 @@
 
 #define CREATE_DEVICE_ARR(type,arg,size) type* arg; cudaMalloc((void**)&arg, sizeof(type) * size);
 
+#define CUDACHECK(name) do {                        \
+  cudaError_t err = cudaGetLastError();             \
+  if (err != cudaSuccess) {                         \
+    printf("Failed: Cuda error %s:%d '%s'\n",       \
+        __FILE__,__LINE__,cudaGetErrorString(err)); \
+    throw std::runtime_error(name);                 \
+  }                                                 \
+} while(0)
+
 typedef struct farray
 {
     float* data;
@@ -64,24 +73,38 @@ public:
 };
 
 
-
+__global__ void sum(float* A,float* B)
+{
+    uint32_t id = blockIdx.x * blockDim.x + threadIdx.x;
+    B[id] += A[id];
+}
 
 class Linear : public Layer
 {
 private:
     farray weights;
     farray buff;
+    farray bias;
     cublasHandle_t handle;
     uint32_t in_size;
     uint32_t out_size;
     float alpha = 1;
     float beta = 0;
+    bool h_bias;
 public:
-    Linear(uint32_t in, uint32_t out) : in_size(in), out_size(out)
+    Linear(uint32_t in, uint32_t out,bool has_bias = true) : in_size(in), out_size(out), h_bias(has_bias)
     {
         cudaMalloc((void**)&weights.data,in*out*sizeof(float));
         cudaMalloc((void**)&grad.data,in*out*sizeof(float));
         cudaMalloc((void**)&err_x.data,in*sizeof(float));
+        if (has_bias)
+        {
+            cudaMalloc((void**)&bias.data,out*sizeof(float));
+            bias.size = out;
+        }
+            
+        threads.x = NOD(out,1024);
+        blocks.x = 1024/threads.x;
         weights.size = in*out;
         cublasCreate(&handle);
     }
@@ -89,6 +112,8 @@ public:
     {
         in_x = x;
         cublasSgemm(handle,CUBLAS_OP_N,CUBLAS_OP_N,1,out_size,in_size,&alpha,x.data,1,weights.data,in_size,&beta,out_x.data,1);
+        if (h_bias)
+            sum<<<blocks,threads>>>(bias.data,out_x.data);
         return out_x;
     }
     farray backward(farray err)
@@ -130,6 +155,7 @@ public:
     {
         in_x = x;
         sigm_forward<<<blocks,threads>>>(x.data,out_x.data);
+        CUDACHECK("forw");
         return out_x;
     }
     farray backward(farray err)
@@ -155,7 +181,6 @@ public:
         for (auto lay : layers)
             out = lay->backward(out);
     }
-   
 };
 
 int main()
@@ -174,7 +199,9 @@ int main()
     cudaMalloc((void**)&in.data,sizeof(float)*32*32);
     cudaMemset(in.data,0,sizeof(float)*32*32);
     
-    cudaDeviceSynchronize();
-    std::cout << net.forward(in).data[0] << std::endl;
+    auto data = net.forward(in);
+    float v;
+    cudaMemcpy(&v,data.data,sizeof(float),cudaMemcpyDeviceToHost);
+    std::cout << v << std::endl;
     return 0;
 }
