@@ -44,5 +44,6 @@
         "streambuf": "cpp",
         "typeinfo": "cpp",
         "cstring": "cpp"
-    }
+    },
+    "editor.renderWhitespace": "selection"
 }
