@@ -104,19 +104,19 @@ public:
 
 };
 
+__global__ void sigm_forward(float* in,float* out)
+{
+    uint32_t id = blockIdx.x * blockDim.x + threadIdx.x;
+    out[id] = 1/(1+exp(-in[id]));
+}
+__global__ void sigm_backward(float* err,float* out,float* grad)
+{
+    uint32_t id = blockIdx.x * blockDim.x + threadIdx.x;
+    grad[id] = err[id]*out[id]*(1-out[id]);
+}
+
 class Sigmoid : public Layer
 {
-private:
-    __global__ void sigm_forward(float* in,float* out)
-    {
-        uint32_t id = blockIdx.x * blockDim.x + threadIdx.x;
-        out[id] = 1/(1+exp(-in[id]));
-    }
-    __global__ void sigm_backward(float* err,float* out,float* grad)
-    {
-        uint32_t id = blockIdx.x * blockDim.x + threadIdx.x;
-        grad[id] = err[id]*out[id]*(1-out[id]);
-    }
 public:
     Sigmoid(uint32_t size) {
         cudaMalloc((void**)&out_x.data,size*sizeof(float));
@@ -160,9 +160,8 @@ public:
 
 int main()
 {
-    auto vec = get_array<float>("weight.txt");
-
     auto net = Model();
+
     net.layers.push_back(new Linear(32 * 32, 16 * 16));
     net.layers.push_back(new Sigmoid(16*16));
     net.layers.push_back(new Linear(16 * 16,4*4));
@@ -170,12 +169,12 @@ int main()
     net.layers.push_back(new Linear(4*4,1));
     net.layers.push_back(new Sigmoid(1));
 
-
+    
     farray in;
     cudaMalloc((void**)&in.data,sizeof(float)*32*32);
     cudaMemset(in.data,0,sizeof(float)*32*32);
     
-    
+    cudaDeviceSynchronize();
     std::cout << net.forward(in).data[0] << std::endl;
     return 0;
 }
