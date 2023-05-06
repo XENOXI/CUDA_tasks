@@ -5,9 +5,10 @@
 #include "cuda_runtime.h"
 #include <cuda.h>
 #include "cublas_v2.h"
+#include "npy.h"
 
 #define CREATE_DEVICE_ARR(type,arg,size) type* arg; cudaMalloc((void**)&arg, sizeof(type) * size);
-
+#define CUBLASCHECK(err) if (err != CUBLAS_STATUS_SUCCESS) { printf ("CUBLAS failed\n"); throw std::runtime_error("dfg"); }
 #define CUDACHECK(name) do {                        \
   cudaError_t err = cudaGetLastError();             \
   if (err != cudaSuccess) {                         \
@@ -17,26 +18,47 @@
   }                                                 \
 } while(0)
 
-typedef struct farray
-{
-    float* data;
-    uint32_t size;
-}farray;
-
 template <class T>
-std::vector<T> get_array(std::string filepath)
+class cudarray
 {
-    std::ifstream file(filepath);
-    std::vector<T> arr;
-    T buff;
-    while (!file.eof())
+private:
+    T* _data=NULL;
+    uint32_t _size=0;
+public:
+    void allocate(uint32_t size)
     {
-        file >> buff;
-        arr.push_back(buff);
+        if (_data)
+            cudaFree(_data);
+
+        cudaMalloc((void**)&_data,sizeof(T)*size);
+        _size = size;
+        
     }
-    arr.pop_back();
-    return arr;
-}
+    cudarray& operator=(std::vector<T> arr)
+    {
+        if (arr.size()!=_size)
+            throw std::runtime_error("Not a valid size");
+        cudaMemcpy(_data,arr.data(),_size*sizeof(T),cudaMemcpyHostToDevice);
+        return *this;
+    }
+    ~cudarray()
+    {
+        if (!_data)
+            cudaFree(_data);
+    }
+    uint32_t size()
+    {
+        return _size;
+    }
+    T* data()
+    {
+        return _data;
+    }
+    void set_size(uint32_t size)
+    {
+        _size = size;
+    }
+};
 
 uint32_t NOD(uint32_t a, uint32_t b)
 {
@@ -48,86 +70,90 @@ uint32_t NOD(uint32_t a, uint32_t b)
     return a + b;
 }
 
-std::vector<float> transpose(std::vector<float> in,uint32_t a,uint32_t b)
-{
-    std::vector<float> out(a*b);
-    for(uint32_t i = 0; i < a; i++)
-        for(uint32_t j = i; j < b; j++)
-            out[j*a+i] = in[i*b+j];
-    return out;
-}
-
+template <class T>
 class Layer
 {
 protected:
-    farray in_x;
-    farray out_x;
-    farray grad;
-    farray err_x;
+    cudarray<T> in_x;
+    cudarray<T> out_x;
+    cudarray<T> grad;
+    cudarray<T> err_x;
     dim3 threads={1,1,1};
     dim3 blocks={1,1,1};
 public:
-    virtual farray forward(farray x) = 0;
-    virtual farray backward(farray err)=0;
+    virtual cudarray<T> forward(cudarray<T> x) = 0;
+    virtual cudarray<T> backward(cudarray<T> err) = 0;
     virtual void read_weights(std::string filepath) {};
 };
 
 
-__global__ void sum(float* A,float* B)
-{
-    uint32_t id = blockIdx.x * blockDim.x + threadIdx.x;
-    B[id] += A[id];
-}
-
-class Linear : public Layer
+class Linear : public Layer<float>
 {
 private:
-    farray weights;
-    farray buff;
-    farray bias;
+    cudarray<float> weights;
+    cudarray<float> buff;
+    cudarray<float> bias;
     cublasHandle_t handle;
-    uint32_t in_size;
-    uint32_t out_size;
-    float alpha = 1;
-    float beta = 0;
     bool h_bias;
+    float alpha=1,beta;
 public:
-    Linear(uint32_t in, uint32_t out,bool has_bias = true) : in_size(in), out_size(out), h_bias(has_bias)
+    
+    Linear(uint32_t in, uint32_t out,bool has_bias = true) : h_bias(has_bias)
     {
-        cudaMalloc((void**)&weights.data,in*out*sizeof(float));
-        cudaMalloc((void**)&grad.data,in*out*sizeof(float));
-        cudaMalloc((void**)&err_x.data,in*sizeof(float));
+        weights.allocate(in*out);
+        grad.allocate(in*out);
+        err_x.allocate(in);
+        out_x.allocate(out);
+        in_x.set_size(in);
+        
+        beta = has_bias;
         if (has_bias)
         {
-            cudaMalloc((void**)&bias.data,out*sizeof(float));
-            bias.size = out;
+            bias.allocate(out);
         }
             
         threads.x = NOD(out,1024);
-        blocks.x = 1024/threads.x;
-        weights.size = in*out;
-        cublasCreate(&handle);
+        blocks.x = out/threads.x;
+        CUBLASCHECK(cublasCreate(&handle));
     }
-    farray forward(farray x)
+    ~Linear()
     {
+        cublasDestroy(handle);
+    }
+    cudarray<float> forward(cudarray<float> x)
+    {
+        if (in_x.size()!=x.size())
+            throw std::runtime_error("Not a valid size");
         in_x = x;
-        cublasSgemm(handle,CUBLAS_OP_N,CUBLAS_OP_N,1,out_size,in_size,&alpha,x.data,1,weights.data,in_size,&beta,out_x.data,1);
         if (h_bias)
-            sum<<<blocks,threads>>>(bias.data,out_x.data);
+            cudaMemcpy(out_x.data(),bias.data(),sizeof(float)*out_x.size(),cudaMemcpyDeviceToDevice);
+
+    
+        cublasSgemm(handle,CUBLAS_OP_N,CUBLAS_OP_N,1,out_x.size(),in_x.size(),&alpha,in_x.data(),1,weights.data(),in_x.size(),&beta,out_x.data(),1);
         return out_x;
     }
-    farray backward(farray err)
+    cudarray<float> backward(cudarray<float> err)
     {
-        cublasSgemm(handle,CUBLAS_OP_N,CUBLAS_OP_T,1,out_size,in_size,&alpha,err.data,1,weights.data,in_size,&beta,err_x.data,1);
-        cublasSgemm(handle,CUBLAS_OP_T,CUBLAS_OP_N,in_size,out_size,1,&alpha,in_x.data,in_size,err.data,1,&beta,grad.data,in_size);
+        cublasSgemm(handle,CUBLAS_OP_N,CUBLAS_OP_T,1,out_x.size(),in_x.size(),&alpha,err.data(),1,weights.data(),in_x.size(),&beta,err_x.data(),1);
+        cublasSgemm(handle,CUBLAS_OP_T,CUBLAS_OP_N,in_x.size(),out_x.size(),1,&alpha,in_x.data(),in_x.size(),err.data(),1,&beta,grad.data(),in_x.size());
         return err_x;
     }
     void read_weights(std::string filepath)
     {
-        cudaMemcpy(weights.data,transpose(get_array<float>(filepath),out_size,in_size).data(),weights.size*sizeof(float),cudaMemcpyHostToDevice);
+        std::vector<npy::ndarray_len_t> shape,bias_shape;
+        std::vector<float> data,bias_data;
+        npy::LoadArrayFromNumpy<float>(filepath,shape,data);
+        
+        cudaMemcpy(weights.data(), data.data(),weights.size()*sizeof(float),cudaMemcpyHostToDevice);
+        if (h_bias)
+        {
+            npy::LoadArrayFromNumpy<float>("bias_"+filepath,bias_shape,bias_data);
+            cudaMemcpy(bias.data(),bias_data.data(),out_x.size()*sizeof(float),cudaMemcpyHostToDevice);
+        }
     }
 
 };
+
 
 __global__ void sigm_forward(float* in,float* out)
 {
@@ -140,52 +166,72 @@ __global__ void sigm_backward(float* err,float* out,float* grad)
     grad[id] = err[id]*out[id]*(1-out[id]);
 }
 
-class Sigmoid : public Layer
+class Sigmoid : public Layer<float>
 {
 public:
     Sigmoid(uint32_t size) {
-        cudaMalloc((void**)&out_x.data,size*sizeof(float));
-        cudaMalloc((void**)&err_x.data,size*sizeof(float));
+        out_x.allocate(size);
+        err_x.allocate(size);
+        in_x.set_size(size);
         threads.x = NOD(size,1024);
-        blocks.x = 1024/threads.x;
-        out_x.size = size;
-        in_x.size = size;
+        blocks.x = size/threads.x;
     }
-    farray forward(farray x)
+    cudarray<float> forward(cudarray<float> x)
     {
+        if (in_x.size()!=x.size())
+            throw std::runtime_error("Not a valid size");
         in_x = x;
-        sigm_forward<<<blocks,threads>>>(x.data,out_x.data);
-        CUDACHECK("forw");
+        
+        sigm_forward<<<blocks,threads>>>(in_x.data(),out_x.data());
+
         return out_x;
     }
-    farray backward(farray err)
+    cudarray<float> backward(cudarray<float> err)
     {
-        sigm_backward<<<blocks,threads>>>(err.data,out_x.data,err_x.data);
+        sigm_backward<<<blocks,threads>>>(err.data(),out_x.data(),err_x.data());
         return err_x;
     }
     void read_weights(std::string filepath) {}
 };
 
+template <class T>
 class Model
 {
 public:
-    std::vector<Layer*> layers;
-    farray forward(farray x)
+    std::vector<Layer<T>*> layers;
+    cudarray<T> forward(cudarray<T> x)
     {
         for (auto lay : layers)
             x = lay->forward(x);
         return x;
     }
-    void backward(farray out)
+    cudarray<T> backward(cudarray<T> out)
     {
         for (auto lay : layers)
             out = lay->backward(out);
+    }
+    void load_from_numpy(std::string filepath)
+    {
+        auto id = filepath.rfind('.');;
+        std::string filename,type;
+        for (int i =0;i<id;i++)
+            filename += filepath[i];
+        for (int i =id;i<filepath.size();i++)
+            type += filepath[i];
+
+        for (int i =0;i<layers.size();i++)
+            layers[i]->read_weights(filename+std::to_string(i) + type);            
+    }
+    ~Model()
+    {
+        for (auto lay : layers)
+            delete lay;
     }
 };
 
 int main()
 {
-    auto net = Model();
+    Model<float> net;
 
     net.layers.push_back(new Linear(32 * 32, 16 * 16));
     net.layers.push_back(new Sigmoid(16*16));
@@ -194,14 +240,21 @@ int main()
     net.layers.push_back(new Linear(4*4,1));
     net.layers.push_back(new Sigmoid(1));
 
+
+    net.load_from_numpy("npy_weights.npy");
     
-    farray in;
-    cudaMalloc((void**)&in.data,sizeof(float)*32*32);
-    cudaMemset(in.data,0,sizeof(float)*32*32);
-    
+    cudarray<float> in;
+    in.allocate(32*32);
+
+    std::vector<npy::ndarray_len_t> shape;
+    std::vector<float> in_data;
+    npy::LoadArrayFromNumpy<float>("data.npy",shape,in_data);
+
+    in = in_data;
     auto data = net.forward(in);
+
     float v;
-    cudaMemcpy(&v,data.data,sizeof(float),cudaMemcpyDeviceToHost);
+    cudaMemcpy(&v,data.data(),sizeof(float),cudaMemcpyDeviceToHost);
     std::cout << v << std::endl;
     return 0;
 }

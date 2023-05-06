@@ -1,0 +1,1 @@
+pgc++ -fast -Minfo=accel -Mcudalib=cublas -o GPU.out main.cu

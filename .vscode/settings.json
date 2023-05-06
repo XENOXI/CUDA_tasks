@@ -44,7 +44,17 @@
         "streambuf": "cpp",
         "typeinfo": "cpp",
         "cstring": "cpp",
-        "map": "cpp"
+        "map": "cpp",
+        "complex": "cpp",
+        "typeindex": "cpp",
+        "chrono": "cpp",
+        "condition_variable": "cpp",
+        "ctime": "cpp",
+        "ratio": "cpp",
+        "set": "cpp",
+        "mutex": "cpp",
+        "thread": "cpp"
     },
-    "editor.renderWhitespace": "selection"
+    "editor.renderWhitespace": "selection",
+    "C_Cpp.errorSquiggles": "enabled"
 }
