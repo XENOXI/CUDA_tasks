@@ -6,7 +6,7 @@
 #include <exception>
 #include <cstring>
 #include <cuda_runtime.h>
-#include "nccl.h"
+#include <nccl.h>
 #include <cuda.h>
 #include <cub/cub.cuh>
 

@@ -6,6 +6,8 @@
 #include <cuda.h>
 #include "cublas_v2.h"
 #include "npy.h"
+#include <chrono>
+#include <iomanip>
 
 #define CREATE_DEVICE_ARR(type,arg,size) type* arg; cudaMalloc((void**)&arg, sizeof(type) * size);
 #define CUBLASCHECK(err) if (err != CUBLAS_STATUS_SUCCESS) { printf ("CUBLAS failed\n"); throw std::runtime_error("dfg"); }
@@ -34,10 +36,15 @@ public:
         _size = size;
         
     }
-    cudarray& operator=(std::vector<T> arr)
+    void resize(uint32_t new_size)
+    {
+        cudaFree(_data);
+        cudaMalloc((void**)&_data,sizeof(T)*new_size);
+    }
+    cudarray& operator=(const std::vector<T> arr)
     {
         if (arr.size()!=_size)
-            throw std::runtime_error("Not a valid size");
+            this->resize(arr.size());
         cudaMemcpy(_data,arr.data(),_size*sizeof(T),cudaMemcpyHostToDevice);
         return *this;
     }
@@ -143,7 +150,10 @@ public:
         std::vector<npy::ndarray_len_t> shape,bias_shape;
         std::vector<float> data,bias_data;
         npy::LoadArrayFromNumpy<float>(filepath,shape,data);
-        
+
+        if (shape[1]!=in_x.size() || shape[0]!=out_x.size())
+            throw std::runtime_error("Not a valid shape");
+
         cudaMemcpy(weights.data(), data.data(),weights.size()*sizeof(float),cudaMemcpyHostToDevice);
         if (h_bias)
         {
@@ -197,8 +207,9 @@ public:
 template <class T>
 class Model
 {
-public:
+private:
     std::vector<Layer<T>*> layers;
+public:
     cudarray<T> forward(cudarray<T> x)
     {
         for (auto lay : layers)
@@ -209,6 +220,10 @@ public:
     {
         for (auto lay : layers)
             out = lay->backward(out);
+    }
+    void push_back(Layer<T>* lay)
+    {
+        layers.push_back(lay);
     }
     void load_from_numpy(std::string filepath)
     {
@@ -231,14 +246,15 @@ public:
 
 int main()
 {
+    
     Model<float> net;
 
-    net.layers.push_back(new Linear(32 * 32, 16 * 16));
-    net.layers.push_back(new Sigmoid(16*16));
-    net.layers.push_back(new Linear(16 * 16,4*4));
-    net.layers.push_back(new Sigmoid(4*4));
-    net.layers.push_back(new Linear(4*4,1));
-    net.layers.push_back(new Sigmoid(1));
+    net.push_back(new Linear(32 * 32, 16 * 16));
+    net.push_back(new Sigmoid(16*16));
+    net.push_back(new Linear(16 * 16,4*4));
+    net.push_back(new Sigmoid(4*4));
+    net.push_back(new Linear(4*4,1));
+    net.push_back(new Sigmoid(1));
 
 
     net.load_from_numpy("npy_weights.npy");
@@ -251,10 +267,15 @@ int main()
     npy::LoadArrayFromNumpy<float>("data.npy",shape,in_data);
 
     in = in_data;
+
+    auto start = std::chrono::high_resolution_clock::now();
     auto data = net.forward(in);
+    
 
     float v;
     cudaMemcpy(&v,data.data(),sizeof(float),cudaMemcpyDeviceToHost);
-    std::cout << v << std::endl;
+    auto finish = std::chrono::high_resolution_clock::now();
+    std::cout << std::chrono::duration_cast<std::chrono::nanoseconds>(finish-start).count() << "ns\n";
+    std::cout << std::fixed << std::setprecision(16) << v << std::endl;
     return 0;
 }
