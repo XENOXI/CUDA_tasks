@@ -256,8 +256,17 @@ int main()
     net.push_back(new Linear(4*4,1));
     net.push_back(new Sigmoid(1));
 
-
-    net.load_from_numpy("npy_weights.npy");
+    try
+    {
+        net.load_from_numpy("npy_weights.npy");
+    }
+    catch(const std::exception& e)
+    {
+        std::cout << e.what() << '\n';
+        return 0;
+    }
+    
+    
     
     cudarray<float> in;
     in.allocate(32*32);
@@ -268,9 +277,18 @@ int main()
 
     in = in_data;
 
+    cudarray<float> data;
     auto start = std::chrono::high_resolution_clock::now();
-    auto data = net.forward(in);
-    
+
+    try
+    {
+        data = net.forward(in);
+    }
+    catch(const std::exception& e)
+    {
+        std::cout << e.what() << '\n';
+        return 0;
+    }   
 
     float v;
     cudaMemcpy(&v,data.data(),sizeof(float),cudaMemcpyDeviceToHost);
